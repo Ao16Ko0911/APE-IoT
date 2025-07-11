@@ -1,13 +1,97 @@
+<!DOCTYPE html>
+<html lang="ja">
 
-            <!DOCTYPE html>
-            <html><head><meta charset="utf-8"><title>R3-301 状態</title>
-            <style>body { font-family: sans-serif; padding: 2em; background: #f9f9f9; }
-            .status { font-size: 1.5em; font-weight: bold; }</style></head>
-            <body><h1>R3-301 現在の状態</h1>
-            <p><strong>日時:</strong> 2025-07-10 10:09:50</p>
-            <p><strong>時限:</strong> 2限</p>
-            <p><strong>予約状態:</strong> データなし</p>
-            <p><strong>CO2濃度:</strong> 480.7 ppm</p>
-            <p class="status"><strong>判定:</strong> 🟢 空室または利用無し</p>
-            </body></html>
-            
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>R3-301 状態</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 2em;
+            background: #f9f9f9;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+
+        .container {
+            background: white;
+            padding: 2em;
+            border-radius: 8px;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+            text-align: center;
+        }
+
+        .status {
+            font-size: 2em;
+            /* 大きく表示 */
+            font-weight: bold;
+            margin: 0.5em 0;
+            padding: 0.5em;
+            border-radius: 5px;
+        }
+
+        #last-updated {
+            margin-top: 2em;
+            font-size: 0.8em;
+            color: #777;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <h1>R3-301 現在の状態</h1>
+
+        <p class="status"><span id="status-text">読み込み中...</span></p>
+
+        <p><strong>時限:</strong> <span id="current-period">...</span></p>
+        <p><strong>予約状態:</strong> <span id="booking-status">...</span></p>
+        <p><strong>CO2濃度:</strong> <span id="co2-value">...</span> ppm</p>
+
+        <p id="last-updated">最終更新: ...</p>
+    </div>
+
+    <script>
+        // ページが読み込まれたら実行
+        document.addEventListener('DOMContentLoaded', () => {
+            fetchStatus();
+        });
+
+        function fetchStatus() {
+            // status.jsonをフェッチ (キャッシュを避けるためにタイムスタンプを追加)
+            fetch('status.json?t=' + new Date().getTime())
+                .then(response => {
+                    // ネットワークエラーのチェック
+                    if (!response.ok) {
+                        throw new Error('Network response was not ok');
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    // IDを使って各要素にデータを設定
+                    document.getElementById('status-text').textContent = data.status_text;
+                    document.getElementById('current-period').textContent = data.current_period;
+                    document.getElementById('booking-status').textContent = data.booking_status;
+                    document.getElementById('co2-value').textContent = data.co2_value;
+                    document.getElementById('last-updated').textContent = '最終更新: ' + data.last_updated;
+                })
+                .catch(error => {
+                    // エラーが発生した場合の処理
+                    console.error('データの取得に失敗しました:', error);
+                    document.getElementById('status-text').textContent = '⚠️ データ取得エラー';
+                });
+        }
+
+        // 60秒ごとにデータを自動更新
+        setInterval(fetchStatus, 60000);
+
+    </script>
+
+</body>
+
+</html>
