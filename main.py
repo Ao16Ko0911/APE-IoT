@@ -1,35 +1,63 @@
 import os
-import json
-import csv
-import time
-from datetime import datetime
-import pytz
+from dotenv import load_dotenv
+import pandas as pd
 import numpy as np
 import requests
+import time
+import csv
+from datetime import datetime
+import pytz
 import gspread
 from gspread_dataframe import get_as_dataframe
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+import pickle
+import json
 
-# === 設定値 ===
-# Airoco APIキーは公開情報のため直接記述
-AIROCO_API_KEY = "6b8aa7133ece423c836c38af01c59880"
+# === .env読み込み ===
+load_dotenv()
 
-# === 環境変数から設定を読み込み ===
-SPREADSHEET_NAME = os.environ['SPREADSHEET_NAME']
-# GitHub Secretsに登録したサービスアカウントのJSONキーを読み込む
-google_creds_json = os.environ['GOOGLE_SERVICE_ACCOUNT_KEY']
-google_creds_dict = json.loads(google_creds_json)
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+REPO_OWNER = os.getenv("REPO_OWNER")
+REPO_NAME = os.getenv("REPO_NAME")
+BRANCH = os.getenv("BRANCH", "main")
+FILE_PATH = os.getenv("FILE_PATH", "index.html")
+COMMIT_MESSAGE = "Update index.html from local script"
 
-# === Google Sheets API 認証 (サービスアカウントを使用) ===
-def get_gspread_client():
-    """サービスアカウント情報を使ってgspreadクライアントを認証します。"""
-    client = gspread.service_account_from_dict(google_creds_dict)
-    return client
+# === Google Sheets API 認証 ===
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
+]
+
+def get_credentials():
+    creds = None
+    if os.path.exists('token.pickle'):
+        with open('token.pickle', 'rb') as token:
+            creds = pickle.load(token)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file('./client_secret.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(creds, token)
+    return creds
+
+creds = get_credentials()
+client = gspread.authorize(creds)
+
 
 # === スケジュール取得 ===
-def get_schedule_data(client):
-    """Googleスプレッドシートから教室の予約スケジュールを抽出します。"""
-    spreadsheet = client.open(SPREADSHEET_NAME)
+def get_schedule_data():
+    """
+    Googleスプレッドシートから教室の予約スケジュールを抽出し、
+    日付、時限、予約状況をまとめたリストを返します。
+    """
+    spreadsheet = client.open("自由使用向け予定表")
     worksheet = spreadsheet.sheet1
+
     df = get_as_dataframe(worksheet, header=None)
     schedule_data = []
     rows = df.values.tolist()
@@ -42,7 +70,7 @@ def get_schedule_data(client):
             if '月' in date_info and '日' in date_info:
                 try:
                     date_part = date_info.split(' ')[0]
-                    # 年を2025年に固定
+
                     temp_date = datetime.strptime(date_part, '%m月%d日')
                     date_str = f'2025-{temp_date.strftime("%m-%d")}'
 
@@ -63,7 +91,6 @@ def get_schedule_data(client):
 
 # === 時限の取得 ===
 def get_current_period(hour):
-    """現在の時間に対応する時限を返します。"""
     if 8 <= hour < 10: return "1限"
     elif 10 <= hour < 12: return "2限"
     elif 13 <= hour < 15: return "3限"
@@ -72,77 +99,112 @@ def get_current_period(hour):
 
 # === CO2センサー値取得 ===
 def get_avg_co2():
-    """Airoco APIから過去1時間の平均CO2濃度を取得します。"""
     now_unix = int(time.time())
     start_time = now_unix - 3600
-    url = f'https://airoco.necolico.jp/data-api/day-csv?id=CgETViZ2&subscription-key={AIROCO_API_KEY}&startDate={start_time}'
+    url = f'https://airoco.necolico.jp/data-api/day-csv?id=CgETViZ2&subscription-key=6b8aa7133ece423c836c38af01c59880&startDate={start_time}'
     res = requests.get(url)
     co2_values = []
-    try:
-        res.raise_for_status() # HTTPエラーがあれば例外を発生
-        reader = csv.reader(res.text.strip().splitlines())
-        for row in reader:
-            if len(row) > 6 and row[1] == 'Ｒ３ー４０１':
-                try:
-                    co2 = float(row[3])
-                    co2_values.append(co2)
-                except ValueError:
-                    continue
-    except requests.exceptions.RequestException as e:
-        print(f"❌ APIリクエストエラー: {e}")
-        return None
-    
+    reader = csv.reader(res.text.strip().splitlines())
+    for row in reader:
+        if len(row) > 6 and row[1] == 'Ｒ３ー４０１':
+            try:
+                co2 = float(row[3])
+                co2_values.append(co2)
+            except ValueError:
+                continue
     return np.mean(co2_values) if co2_values else None
 
 # === 状態判定 ===
 def determine_usage(booking, co2):
-    """予約状況とCO2濃度から教室の状態を判定します。"""
-    if booking == "○" and co2 and co2 > 1000:
+    if booking == "×" and co2 and co2 > 1000:
         return "✅ 正常利用中"
-    elif booking == "○" and (co2 is None or co2 < 600):
+    elif booking == "×" and (not co2 or co2 < 600):
         return "⚠️ 無断キャンセルの可能性"
     else:
         return "🟢 空室または利用無し"
 
-# === メイン処理 ===
-def main():
-    """メイン処理。各種データを取得・判定し、結果をJSONファイルに出力します。"""
+# === GitHubへアップロード ===
+def upload_file_to_github(file_path, content_str, commit_message):
+    """
+    指定された内容のファイルをGitHubにアップロードする
+    """
+    import base64
+    api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{file_path}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+
+    # 既存ファイルのSHAを取得
+    sha = None
     try:
-        jst = pytz.timezone('Asia/Tokyo')
-        now = datetime.now(jst)
-        # 現在時刻を2025年として扱う
-        today_str = datetime(2025, now.month, now.day).strftime('%Y-%m-%d')
-        hour = now.hour
-        period = get_current_period(hour)
-
-        # Google Sheetsからデータを取得
-        gspread_client = get_gspread_client()
-        schedule = get_schedule_data(gspread_client)
-        booking = next((item['状態'] for item in schedule if item['日付'] == today_str and item['時間'] == period), "データなし")
-
-        # CO2センサー値を取得
-        co2 = get_avg_co2()
-
-        # 状態を判定
-        status = determine_usage(booking, co2)
-
-        # 出力データを作成
-        output_data = {
-            "status_text": status,
-            "booking_status": booking or "なし",
-            "co2_value": f"{co2:.1f}" if co2 is not None else "N/A",
-            "current_period": period or "授業時間外",
-            "last_updated": now.strftime('%Y-%m-%d %H:%M:%S')
-        }
-
-        # データをJSONファイルに書き出し
-        with open("status.json", "w", encoding="utf-8") as f:
-            json.dump(output_data, f, indent=2, ensure_ascii=False)
-
-        print(f"✅ {now.strftime('%H:%M:%S')} - status.json の生成に成功しました。")
-
+        get_res = requests.get(api_url, headers=headers)
+        if get_res.status_code == 200:
+            sha = get_res.json()["sha"]
     except Exception as e:
-        print(f"❌ メイン処理でエラーが発生しました: {e}")
+        print(f"⚠️ SHA取得時の例外: {e}")
+        # SHA取得に失敗しても続行
 
+    # コンテンツをBase64にエンコード
+    content_b64 = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
+
+    update_data = {
+        "message": commit_message,
+        "content": content_b64,
+        "branch": BRANCH,
+    }
+    if sha:
+        update_data["sha"] = sha
+
+    put_res = requests.put(api_url, headers=headers, json=update_data)
+
+    if put_res.status_code in [200, 201]:
+        print(f"✅ GitHubへ {file_path} のアップロード成功！")
+    else:
+        print(f"❌ GitHubアップロード失敗: {put_res.status_code}")
+        print(put_res.text)
+
+# === メイン処理ループ ===
+def main_loop(interval_sec=600):
+    while True:
+        try:
+            now = datetime.now(pytz.timezone('Asia/Tokyo'))
+            today = now.strftime('%Y-%m-%d')
+            hour = now.hour
+            period = get_current_period(hour)
+
+            # データの取得と判定
+            schedule = get_schedule_data()
+            booking = next((e['状態'] for e in schedule if e['日付'] == today and e['時間'] == period), "データなし")
+            co2 = get_avg_co2()
+            status = determine_usage(booking, co2)
+
+            # データを辞書形式でまとめる
+            output_data = {
+                "status_text": status,
+                "booking_status": booking or "なし",
+                "co2_value": f"{co2:.1f}" if co2 is not None else "N/A",
+                "current_period": period or "授業時間外",
+                "last_updated": now.strftime('%Y-%m-%d %H:%M:%S')
+            }
+
+            # 辞書をJSON形式の文字列に変換
+            json_str = json.dumps(output_data, indent=2, ensure_ascii=False)
+
+            # JSONファイルをGitHubにアップロード
+            upload_file_to_github(
+                file_path="status.json", # アップロードするファイル名
+                content_str=json_str,
+                commit_message="Update classroom status data"
+            )
+
+            print(f"🕒 {now.strftime('%H:%M:%S')} に実行完了。次回は {interval_sec//60} 分後。")
+
+        except Exception as e:
+            print(f"⚠️ メインループでエラー発生: {e}")
+
+        time.sleep(interval_sec)
+
+# スクリプト開始
 if __name__ == "__main__":
-    main()
+    main_loop(600)  # 10分ごとに実行
